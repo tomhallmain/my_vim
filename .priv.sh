@@ -5,10 +5,10 @@ toascii() { # Convert file to ascii: toascii file
     local file="$1" tmp=$(ds:tmp 'toascii')
     cp "$file" $tmp
     native2ascii $tmp > "$file"
-    echo "File $file converted to ascii. Copy of original file at $tmp"
+    rm "$tmp"
 }
 
-jqsearch() { # Search JSON: jqsearch query JSON_file
+jqkeyssearch() { # Search JSON: jqsearch query JSON_file
     jq ".. | objects | with_entries(select(.key | test(\"$1\"; \"i\"))) | select(. != {})" "$2"
 }
 
@@ -16,7 +16,7 @@ jqkeys() { # Get keys from JSON
     jq -r '[paths | join(".")]' "$1"
 }
 
-jvi() { # ds:grepvi "public.+$1": jvi methodname
+jvi() { # ds:grepvi public.+$1: jvi methodname
     ds:grepvi "public.+$1"
 }
 
@@ -25,13 +25,14 @@ java_long_extends() { # Java long extends: java_long_extends
 }
 
 java_class_extensions() { # Java class extensions: java_class_extensions
-    rg -Iog '*java' ' [A-z][A-z0-9\.]+ extends [A-z][A-z0-9\.]+( |\{|<)' \
+    rg -Iog '*java' -e ' [A-z][A-z0-9\.]+[[:space:]]+extends[[:space:]]+[A-z][A-z0-9\.]+( |\{|<)' \
+        -e  ' class[[:space:]]+[A-z][A-z0-9\.]+[[:space:]]+( |\{|<_)' \
         | rg '[A-Z]' \
-        | sed -E 's:extends ::g;s:(^ +| +$)::g;s:(\{|<)$::g'
+        | sed -E 's: class : :g;s:extends ::g;s:(^ +| +$)::g;s:(\{|<)$::g'
 }
 
 java_class_graph() { # Java class graph: java_class_graph
-    java_class_extensions | ds:graph | sed 's#\[\[:space:\]\]\+# #g' | sort
+    java_class_extensions | ds:graph -v print_bases=1 | sed 's#\[\[:space:\]\]\+# #g' | sort
 }
 
 retouchbar() { # Refresh touchbar: retouchbar
@@ -49,30 +50,16 @@ dl() { # Download internet media: dl url [output_filename]
     fi
 }
 
-m3u_dl() { # Downloads a streaming video into MP4 from an m3u playlist resource
-    local url=$1
-    if [ -z $2 ]; then
-        local count=0
-        local basepath=~"/Downloads/untitled folder/m3u_converted_output"
-        local filepath="${basepath}.mp4"
-        while [ -f $filepath ]; do ((count++)); filepath="${basepath}${count}.mp4"; done
-    else
-        echo 'Unable to parse download url'
-        local filepath="${2}"
-    fi
-}
-
-vlc_dl() { # Download a media file using VLC: vlc_dl url [output_filename]
+vlc_dl() { # Download media file using VLC: vlc_dl url [output_filename]
     local url="$1" file="$(gen_next_series_file ~"/Downloads/vlc_output.mp4" "$2")"
     VLC -vvv "$url" --sout "file/ts:${file}"
 }
 
-m3u_dl() { # Downloads a streaming video into MP4 from an m3u playlist resource: m3u_dl url [output_filename]
-    local url="$1" file="$(gen_next_series_file ~"/Downloads/m3u_converted_output.mp4" "$2")"
+m3u_dl() { # Download streaming video to MP4 from m3u playlist resource: m3u_dl url [output_filename]
+    local url="$1" output_file="$(gen_next_series_file ~"/Downloads/m3u_converted_output.mp4" "$2")"
     local whitelist=(-protocol_whitelist "crypto,data,file,hls,http,https,tcp,tls")
     local user_agent_osx="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_5) AppleWebKit/601.7.8 (KHTML, like Gecko) Version/9.1.3 Safari/537.86.7"
-    ffmpeg "${whitelist[@]}" -user_agent "$user_agent_osx" -i "$url" -c copy "$file"
-    ffmpeg "${whitelist[@]}" -user_agent "$user_agent_osx" -i "$url" -c copy "$filepath"
+    ffmpeg "${whitelist[@]}" -user_agent "$user_agent_osx" -i "$url" -c copy "$output_file"
 }
 
 strip_audio() { # Strips audio from a video file using ffmpeg: strip_audio source_path
@@ -88,12 +75,95 @@ combin_vid_aud() { # Combine video and audio: combin_vid_aud vid aud [output_fil
 }
 
 media_title() { # Get media title using ffmpeg
-    ffmpeg -i "$1" 2>&1 | rg title | ds:reo a 'NF>1' -F: | sed -E 's#^ +##g;s# +$##g;s# +#_#g'
+    ffmpeg -i "$1" 2>&1 | rg title | ds:reo a 'NF>1' -F: | sed -E 's#^ +##g;s# +$##g;s# +#_#g;s#/#_#g'
 }
 
 media_duration() { # Get media duration using ffmpeg
     ffmpeg -i "$1" 2>&1 | rg Duration | ds:reo a 1 -F, | sed -E 'S#^ +Duration: +##g;s# +$##g'
 }
+
+gen_next_series_file_no_() { # Return next index in series of filenames or default: gen_next_series_file_no_ default_filename [filename]
+    local default="$1" count=1
+    [ "$2" ] && local startpath="$2" || local startpath="$default"
+    local filepath="$(ds:filename_str "$startpath" "${count}")"
+    while [ -f "$filepath" ]
+    do
+        ((count++))
+        if [ $count -eq 10 ]
+        then
+            let local trycount=50
+            while [ -f "$(ds:filename_str "$startpath" "$trycount")" ]
+            do
+                let local count=$trycount+1
+                let local trycount+=50
+            done
+        fi
+        local filepath="$(ds:filename_str "$startpath" "$count")"
+    done
+    echo -n "$filepath"
+}
+
+move_gen () { # Create the next file index from a base pattern: move_gen move_without_confirm=f basename file target_dir
+    local confirm="$1"
+    if [ -z "$2" ]
+    then
+        local basefile="$(ds:readp 'Enter basename+extension')"
+    else
+        local basefile="$2"
+    fi
+    if [ -z "$3" ]
+    then
+        local sourcefile=""
+        while [ ! -f "$sourcefile" ]
+        do
+            local sourcefile="$(ds:readp 'Enter sourcefile')"
+        done
+    elif [ ! -f "$3" ]
+    then
+        echo "Invalid file provided: \"$3\""
+        local sourcefile=""
+        while [ ! -f "$sourcefile" ]
+        do
+            local sourcefile="$(ds:readp 'Enter sourcefile')"
+        done
+    else
+        local sourcefile="$3"
+    fi
+    if [ "$4" ]
+    then
+        if [ -d "$4" ]
+        then
+            local basefile="$4/$basefile"
+        else
+            ds:fail "Invalid target directory: $4"
+        fi
+    fi
+    read -r dirpath filename extension <<< $(ds:path_elements "$sourcefile")
+    local source_extension="$extension"
+    read -r dirpath1 filename1 extension1 <<< $(ds:path_elements "$basefile")
+    if [ -z "$extension1" ]
+    then
+        local basefile="${basefile}${source_extension}"
+    elif [ ! "$extension1" = "$source_extension" ]
+    then
+        echo 'Resolving extension for file'
+        local basefile="$(echo "$basefile" | sed -E "s#\\$extension1\$#\\$source_extension#g")"
+    fi
+    local to_file="$(gen_next_series_file_no_ "$basefile")"
+    if [ "$confirm" != y ]
+    then
+        local confirm="$(ds:readp "Move $sourcefile to $to_file ? (y|n)")"
+        if [ "$confirm" != y ]
+        then
+            return 1
+        fi
+    fi
+    if [ -f "$sourcefile" ]
+    then
+        mv "$sourcefile" "$to_file" && echo "Moved \"$sourcefile\" -> \"$to_file\""
+    fi
+}
+alias mgy="move_gen y $@"
 
 gen_next_series_file() { # Return next index in series of filenames or default: gen_next_series_file default_filename [filename]
     local default="$1" count=0
@@ -102,9 +172,94 @@ gen_next_series_file() { # Return next index in series of filenames or default: 
     while [ -f "$filepath" ]
     do
         ((count++))
-        local filepath="$(ds:filename_str "$startpath" "_${count}")"
+        if [ $count -eq 10 ]
+        then
+            let local trycount=50
+            while [ -f "$(ds:filename_str "$startpath" "_$trycount")" ]
+            do
+                let local count=$trycount+1
+                let local trycount+=50
+            done
+        fi
+        local filepath="$(ds:filename_str "$startpath" "_$count")"
     done
     echo -n "$filepath"
+}
+
+get_sha1s () { # Get sha1s from filepath lines: fd . | get_sha1s
+    if [ "$1" ]
+    then
+        ds:line 'if [ -f "$line" ]; then openssl sha1 "$line"; fi'
+    else
+        ds:line 'if [ -f "$line" ]; then openssl sha1 "$line" | awk "{print \$2}"; fi'
+    fi
+}
+
+add_sha1s_to_sets() { # Save down sha1s from files to an ids.db file: add_sha1s_to_sets set_title file*
+    cp ids.db sets.db
+    if [ -f "$1" ]
+    then
+        echo "Invalid title $1"
+        return 1
+    else
+        local title="$1"
+        shift
+    fi
+    echo "\n$title" >> ids.db
+    while [ "$1" ]
+    do
+        if [ -f "$1" ]
+        then
+            echo "$1" | get_sha1s >> ids.db
+        else
+            echo "Arg \"$1\" was an invalid file address."
+        fi
+        shift
+    done
+    echo >> ids.db
+}
+
+open_sha1 () { # Open file in current dir by matching sha1: open_sha1 target_sha1 [force_data_update=f]
+    local data_file=.sha1s.db force_data_update="${2:-f}"
+    rm /tmp/open_sha1* 2>/dev/null; :
+    if [ ! -f $data_file ] || ds:test 't(rue)?' "$force_data_update"; then
+        local tmp_file=$(ds:tmp 'open_sha1')
+        echo "Building SHA1 data file..."
+        fd | get_sha1s t > $tmp_file
+        cp $tmp_file $data_file
+        rm $tmp_file
+        echo "Saved updated SHA1 data at $data_file"
+    fi
+    local target="$1"
+    let local target_len=$(echo "$target" | awk '{print length($0)}')
+    ds:is_int "$target_len" || ds:fail "Unable to determine target length for target \"$target\""
+    if [ $target_len -ne 40 ]; then
+        while read -r line
+        do
+            if [ -f "$line" ]; then
+                local FILES=( ${FILES[@]} "$line" )
+            fi
+        done < <(awk -v target="$target" '$2~target{print $1}' $data_file | sed -E 's#^SHA1\(##g;s#\)= *##g')
+        open ${FILES[@]}
+    else
+        awk -v target="$target" '$2==target{print $1; exit}' $data_file \
+            | head -n1 | sed -E 's#^SHA1\(##g;s#\)= *##g' | xargs open
+    fi
+}
+
+open_set () { # Open a set of files stored in ids.db file in current dir: open_set set_title
+    [[ "$1" =~ "^ *$" ]] && echo "Invalid set title provided" && return 1
+    local target_sha1s="($(awk -v set_name="$1" 'set_found{ if ($0 ~ "^[[:space:]]*$") exit; print} $0 ~ set_name {set_found = 1}' ids.db | ds:join_by '|'))"
+    open_sha1 "$target_sha1s" "$2"
+}
+
+get_sets() { # Show a list of all sets in ids.db with file counts: get_sets [sort_key]
+    awk ' BEGIN { searching = 1 }
+          $0 ~ "^[[:space:]]*$" { searching = 1; next }
+          searching { searching = 0; set = $0; next }
+          { set_counts[set]++ }
+          END { for (set in set_counts) {print set_counts[set], set} }' ids.db \
+        | sort -V -k"${1:-1}" | ds:ttyf
 }
 
 rename-last-dl() { # Rename last downloaded file: rename-last-dl [search]
@@ -128,10 +283,63 @@ rm_ds_store() { # Removes .DS_Store hidden files: rm_ds_store
 }
 
 find_malformed() { # Find files with malformed names: fd_malformed
-    fd $@ . | rg -v " " | rg --color=never '([a-z][A-Z]|[0-9][a-z]|^[0-9]+\.)'
+    fd $@ . | rg -v " " | rg --color=never '([a-z][A-Z]|[0-9][a-z]|^[0-9]+\.)' | sort
 }
 
-files_rename() { # Rename all files matching a pattern given, using the command set on var file: files_rename 'media_title $file' '^No_' $(fd files)
+get_close_sorted_files () { # Get files closely sorted by version sort: get_close_sorted_files anchor
+    _file="$1"
+    ds:file_check "$_file" f t
+    read -r _dir _name _ext <<< $(ds:path_elements "$_file")
+    fd . | sort -V | awk -v matchfile="$_file" \
+    'BEGIN{
+        count=0; start_pointer=1; matchfile_found=0; files_set=0
+    }
+    (count - start_pointer) > 20 {exit}
+    {
+        count++; file=$0
+        if (length(files) > 10 && !matchfile_found) { delete files[start_pointer]; start_pointer++ }
+        if (file == matchfile) matchfile_found=1
+        files[count]=file
+    }
+    END{
+        for (i = start_pointer; i <= count; i++) if (files[i]) {print files[i]}
+    }'
+}
+
+get_close_sorted_image_files () { # Get image files closely sorted by version sort: get_close_sorted_image_files anchor
+    _file="$1"
+    ds:file_check "$_file" f t
+    read -r _dir _name _ext <<< $(ds:path_elements "$_file")
+    fd '\.(jpe?g|png|webp)' | sort -V | awk -v matchfile="$_file" \
+    'BEGIN{
+        count=0; start_pointer=1; matchfile_found=0; files_set=0
+    }
+    (count - start_pointer) > 20 {exit}
+    {
+        count++; file=$0
+        if (length(files) > 10 && !matchfile_found) { delete files[start_pointer]; start_pointer++ }
+        if (file == matchfile) matchfile_found=1
+        files[count]=file
+    }
+    END{
+        for (i = start_pointer; i <= count; i++) if (files[i]) {print files[i]}
+    }'
+}
+
+open_close_sorted_files () { # Open files closely sorted to an anchor: open_close_sorted_files anchor
+    _FILES_=()
+    while read -r line
+    do
+        if [ -f "$line" ]
+        then
+            _FILES_=(${_FILES_[@]} "$line")
+        fi
+    done < <(get_close_sorted_image_files $@)
+    open ${_FILES_[@]}
+}
+alias csf="open_close_sorted_files $@"
+
+files_rename() { # Rename files using the command set on var file: files_rename 'media_title $file' [exclude_pattern] $(fd files)
     if [ ! "$3" ]
     then
         echo 'Missing arguments'
@@ -142,40 +350,72 @@ files_rename() { # Rename all files matching a pattern given, using the command 
     shift
     if [ ! -f "$1" ]
     then
-        output_exclusion="$1"
+        local output_exclusion="$1"
         shift
     fi
 
     while [ "$1" ]
     do
-        local file="$1"
+        local file="$1" replace="$(eval "$transform_commands")"
         [ ! -f "$file" ] && shift && continue
-        echo "$file"
-        new_filepath="$(ds:filename_str "$file" "$(eval "$transform_commands")" replace)"
-        new_filepath="$(gen_next_series_file "$new_filepath")"
-        echo "$new_filepath\n"
+        [[ "$file" =~ "^$replace" ]] && shift && continue
+        [ "$replace" = 'No_matches_found' ] && shift && continue
+        [ "$replace" = "''" ] && shift && continue
+        local new_filepath="$(ds:filename_str "$file" "$replace" replace)"
+        local new_filepath="$(gen_next_series_file "$new_filepath")"
         if [ "$output_exclusion" ]
         then
             ds:test "$output_exclusion" "$new_filepath" && shift && continue
         fi
+        echo "Current filename:"
+        echo "\033[37;1m$file\033[0m"
+        echo "New filename:"
+        echo "\033[37;1m$new_filepath\n\033[0m"
         if [ "$(ds:readp 'Rename file? (y/n)')" = 'y' ]
         then
             mv "$file" "$new_filepath"
         fi
+        echo
         shift
+    done
+
+    echo "File parsing complete. If no output, all of the new filenames were excluded by the current output exclusions."
+}
+
+files_rename_all() { # Rename all files maatching a pattern to an indexed list: files_rename_all [base_dir] file_match_pattern new_base_filename
+    if [ -d "$1" ]; then
+        local base_dir="$1"
+        shift
+    else
+        local base_dir=.
+    fi
+
+    local file_match_pattern="$1" new_base_filename="$2"
+    let local f_count=0
+    for f in $(fd "$file_match_pattern" "$base_dir"); do
+        let local f_count+=1
+    done
+    [ $f_count = 0 ] && echo "No files found matching \"$file_match_pattern\" in \"$base_dir\"" && return 1
+    local confirm="$(ds:readp "Found $f_count files to rename in \"$base_dir\", proceed with rename to \"$new_base_filename\" (y/n):")"
+    [ ! "$confirm" = y ] && echo "No files renamed." && return
+
+    for _f_ in $(fd "$file_match_pattern" "$base_dir" | sort); do
+        local new_filepath="$(ds:filename_str "$_f_" "$new_base_filename" replace)"
+        local new_filepath="$(gen_next_series_file "$new_filepath")"
+        mv "$_f_" "$new_filepath"
     done
 }
 
 find_ml() { # Search for files matching markup language patterns: find_ml [dir]
     if [ "$1" ]; then
         local dir="$(dirname "$1")"
-        rg --files-with-matches -e "^<\?xml" -e "^<\?html" "$dir"
+        rg --files-with-matches -e "^<\?xml" -e "^<\?html" "$dir" | sort
     else
-        rg --files-with-matches -e "^<\?xml" -e "^<\?html"
+        rg --files-with-matches -e "^<\?xml" -e "^<\?html" | sort
     fi
 }
 
-function log() { # Not sure what this does but I think it is similar to debug
+function log() { # Similar to debug?
     if [[ $_V -eq 1 ]]
     then
         echo "$@"
@@ -324,6 +564,37 @@ crc() { # Remote control headless Chrome
     # --remote-debugging-port=9222
 }
 
+read_groups () { # Read groups from simple_image_compare output
+    wait_t="${2:-30}"
+    ds:is_int "$wait_t" || return 1
+    while read -r line
+    do
+        if [ "$line" = "" ]
+        then
+            continue
+        elif [[ "$line" =~ 'Group' ]]
+        then
+            if [ "${_FILES_[2]}" ]
+            then
+                open ${_FILES_[@]}
+            fi
+            _FILES_=()
+            sleep "$wait_t"
+            echo "$line"
+            continue
+        fi
+        if [ "$line" ]
+        then
+            line="$(echo $line | sed -E 's#_[A-Z0-9]{26}\.[0-9]{3,4}x0##g')"
+            if [ -f "$line" ]
+            then
+                echo "$line"
+                _FILES_=("${_FILES_[@]}" "$line")
+            fi
+        fi
+    done < <(cat simple_image_compare_file_groups_output.txt | awk 'if_print{print}!if_print && $0~/^Group '$1'/{if_print=1}')
+}
+
 run_rdij() { # Runs reddit injection script: run_rdij [top] [comments] [standard_channels||channels]
     if [ ! "$1" ]
     then
@@ -350,7 +621,7 @@ rd_user() { # Catalog a reddit user: rd_user user desc [left]
 
 ls_priv() { # Lists private commands: ls_priv
     echo
-    rg --color=never '[[:alnum:]_]*\(\)' ~/my_vim/.priv.sh 2> /dev/null | rg -v 'rg --' | sort \
+    rg --color=never '[0-9A-Za-z_]+ ?\(\)' ~/my_vim/.priv.sh 2> /dev/null | rg -v 'rg --' | sort \
         | awk -F "\\\(\\\) { #" '{printf "%-18s\t%s\n", $1, $2}' \
         | ds:subsep '\\\*\\\*' "$DS_SEP" -v retain_pattern=1 -v apply_to_fields=2 -v FS="[[:space:]]{2,}" -v OFS="$DS_SEP" \
         | ds:subsep ":[[:space:]]" "888" -v apply_to_fields=2 -v FS="$DS_SEP" -v OFS="$DS_SEP" \
